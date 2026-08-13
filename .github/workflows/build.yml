@@ -14,19 +14,27 @@ jobs:
           # AMD64 动态构建
           - os: windows-latest
             sys: mingw64
+            arch: x86_64
             mode: dynamic
+            nsis_suffix: p
           # AMD64 静态构建
           - os: windows-latest
             sys: mingw64
+            arch: x86_64
             mode: static
+            nsis_suffix: p
           # ARM64 原生动态构建
           - os: windows-11-arm
             sys: clangarm64
+            arch: clang-aarch64
             mode: dynamic
+            nsis_suffix: c
           # ARM64 原生静态构建
           - os: windows-11-arm
             sys: clangarm64
+            arch: clang-aarch64
             mode: static
+            nsis_suffix: c
     runs-on: ${{ matrix.os }}
     env:
       dynamic_flags: '--enable-gtk'
@@ -60,7 +68,6 @@ jobs:
           grep
           sed
           base-devel
-          meson
         pacboy: >-
           toolchain:p
           binutils:p
@@ -85,7 +92,6 @@ jobs:
           ninja:p
           pixman:p
           pkgconf:p
-          python:p
           SDL2:p
           SDL2_image:p
           snappy:p
@@ -94,7 +100,21 @@ jobs:
           zstd:p
           libslirp:p
           python-distlib:p
-          nsis:${{ endsWith(matrix.os, 'arm') && 'c' || 'p' }}
+          nsis:${{ matrix.nsis_suffix }}
+
+    # 关键修复：显式安装正确的 Python 和 Meson（MinGW 版本）
+    - name: 'Install MinGW Python and Meson'
+      run: |
+        pacman --noconfirm -S \
+          mingw-w64-${{ matrix.arch }}-python \
+          mingw-w64-${{ matrix.arch }}-meson
+
+    # 对于 clangarm64，需要额外安装 python-packaging
+    - name: 'Install additional Python packages for clangarm64'
+      if: ${{ startsWith(matrix.sys, 'clang') }}
+      run: |
+        pacman --noconfirm -S \
+          mingw-w64-${{ matrix.arch }}-python-packaging
 
     - name: 'Modify pkgconfig to avoid linker issues'
       if: ${{ matrix.mode == 'static' }}
@@ -118,31 +138,57 @@ jobs:
         echo "📌 Ninja 版本:"
         ninja --version
         echo ""
+        echo "📌 架构信息:"
+        gcc -dumpmachine
+        echo ""
         echo "✅ 环境验证完成"
 
     - name: 'Configure QEMU (${{ matrix.mode }} build)'
       env:
         mode_flags: ${{ matrix.mode == 'dynamic' && env.dynamic_flags || env.static_flags }}
-        extra_cflags: ${{ (matrix.mode == 'static' || startsWith(matrix.sys, 'clang')) && format('--extra-cflags="{0} {1}"', matrix.mode == 'static' && env.static_extra_cflags || '', startsWith(matrix.sys, 'clang') && env.clang_extra_cflags || '') || '' }}
       run: |
+        # 构建 extra_cflags
+        EXTRA_CFLAGS=""
+        if [ "${{ matrix.mode }}" == "static" ]; then
+          EXTRA_CFLAGS="$EXTRA_CFLAGS ${{ env.static_extra_cflags }}"
+        fi
+        if [[ "${{ matrix.sys }}" == clang* ]]; then
+          EXTRA_CFLAGS="$EXTRA_CFLAGS ${{ env.clang_extra_cflags }}"
+        fi
+        
+        if [ -n "$EXTRA_CFLAGS" ]; then
+          EXTRA_CFLAGS="--extra-cflags=\"$EXTRA_CFLAGS\""
+        fi
+        
         ./configure --enable-sdl \
                     --enable-fdt=system \
                     --disable-docs \
                     --target-list=arm-softmmu,aarch64-softmmu \
                     --prefix="$(cygpath -u '${{ github.workspace }}')/artifacts" \
-                    ${{ format('{0} {1}', env.mode_flags, env.extra_cflags) }}
+                    ${{ env.mode_flags }} \
+                    $EXTRA_CFLAGS
 
     - name: 'Build QEMU'
       run: |
         make -j$(nproc)
         echo "version=v$(cat VERSION)-$(git rev-parse --short HEAD)" >> $GITHUB_ENV
 
+    # 对于 clangarm64，需要正确的 NSIS 路径
     - name: 'Workaround for clangarm64 nsis'
-      if: ${{ endsWith(matrix.os, 'arm') && matrix.mode == 'dynamic' }}
+      if: ${{ startsWith(matrix.sys, 'clang') && matrix.mode == 'dynamic' }}
       run: |
-        ln -s /clang64/share/nsis /clangarm64/share/nsis 2>/dev/null || true
-        ln -s /clang64/etc/nsisconf.nsh /clangarm64/etc/nsisconf.nsh 2>/dev/null || true
-        ln -s /clang64/bin/makensis.exe /clangarm64/bin/makensis.exe 2>/dev/null || true
+        # 创建符号链接让 NSIS 在 clangarm64 环境中工作
+        if [ ! -d "/${{ matrix.sys }}/share/nsis" ] && [ -d "/clang64/share/nsis" ]; then
+          ln -s /clang64/share/nsis /${{ matrix.sys }}/share/nsis 2>/dev/null || true
+        fi
+        if [ ! -f "/${{ matrix.sys }}/etc/nsisconf.nsh" ] && [ -f "/clang64/etc/nsisconf.nsh" ]; then
+          ln -s /clang64/etc/nsisconf.nsh /${{ matrix.sys }}/etc/nsisconf.nsh 2>/dev/null || true
+        fi
+        if [ ! -f "/${{ matrix.sys }}/bin/makensis.exe" ] && [ -f "/clang64/bin/makensis.exe" ]; then
+          ln -s /clang64/bin/makensis.exe /${{ matrix.sys }}/bin/makensis.exe 2>/dev/null || true
+        fi
+        # 确保可执行权限
+        chmod +x /${{ matrix.sys }}/bin/makensis.exe 2>/dev/null || true
 
     - name: 'Prepare artifacts (static)'
       if: ${{ matrix.mode == 'static' }}
