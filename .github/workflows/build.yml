@@ -1,4 +1,4 @@
-name: Build QEMU (DF4D3110/qemu)
+name: Build
 
 on:
   push:
@@ -6,42 +6,29 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-windows-arm64:
+
+  build:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          # ARM64 原生动态构建
-          - os: windows-11-arm
-            sys: clangarm64
-            arch: clang-aarch64
-            mode: dynamic
-            extra_conf: '--enable-gtk'
-            extra_cflags: ''
-            disable_libnfs: ''
-          # ARM64 原生静态构建
-          - os: windows-11-arm
-            sys: clangarm64
-            arch: clang-aarch64
-            mode: static
-            extra_conf: '--disable-gtk --disable-spice --disable-usb-redir --disable-smartcard --disable-gnutls --disable-libssh --disable-vnc-sasl --static'
-            extra_cflags: '-DCURL_STATICLIB -DLIBSSH_STATIC -DLIBSLIRP_STATIC -DCAIRO_WIN32_STATIC_BUILD'
-            disable_libnfs: '--disable-libnfs'
+        os: [windows-11-arm]
+        sys: [clangarm64]
+        mode: [dynamic, static]
     runs-on: ${{ matrix.os }}
     env:
+      dynamic_flags: '--enable-gtk'
+      static_flags: '--disable-gtk --disable-spice --disable-usb-redir --disable-smartcard --disable-gnutls --disable-libssh --disable-vnc-sasl --static'
+      static_extra_cflags: '-DCURL_STATICLIB -DLIBSSH_STATIC -DLIBSLIRP_STATIC -DCAIRO_WIN32_STATIC_BUILD'
       clang_extra_cflags: '-Wno-missing-prototypes -Wno-sometimes-uninitialized -Wno-pragma-pack'
 
-    name: ${{ format('🚧 Windows {0} {1} build (ARM64)', matrix.sys, matrix.mode) }}
+    name: ${{ format('🚧 {0} Build {1}', matrix.sys, matrix.mode) }}
     defaults:
       run:
         shell: msys2 {0}
-
     steps:
+
     - name: '🧰 Checkout'
-      uses: actions/checkout@v4
-      with:
-        repository: DF4D3110/qemu
-        ref: master
+      uses: actions/checkout@main
 
     - name: 'Setup MSYS2'
       uses: msys2/setup-msys2@v2
@@ -54,9 +41,9 @@ jobs:
           bison
           diffutils
           flex
-          grep
-          sed
           base-devel
+          python
+          python-setuptools
         pacboy: >-
           toolchain:p
           binutils:p
@@ -65,6 +52,7 @@ jobs:
           curl:p
           cyrus-sasl:p
           dtc:p
+          gcc:p
           glib2:p
           gnutls:p
           gtk3:p
@@ -80,6 +68,7 @@ jobs:
           ninja:p
           pixman:p
           pkgconf:p
+          python:p
           SDL2:p
           SDL2_image:p
           snappy:p
@@ -90,171 +79,60 @@ jobs:
           python-distlib:p
           nsis:c
 
-    # 安装正确的 MinGW Python 和 Meson
-    - name: 'Install MinGW Python and Meson'
-      run: |
-        pacman --noconfirm -S \
-          mingw-w64-${{ matrix.arch }}-python \
-          mingw-w64-${{ matrix.arch }}-meson \
-          mingw-w64-${{ matrix.arch }}-python-packaging
-
-    # 修复 dlltool 用于动态构建
-    - name: 'Fix dlltool for dynamic build'
-      if: ${{ matrix.mode == 'dynamic' && startsWith(matrix.sys, 'clang') }}
-      run: |
-        # 备份 LLVM dlltool
-        if [ -f "/${{ matrix.sys }}/bin/dlltool.exe" ]; then
-          mv /${{ matrix.sys }}/bin/dlltool.exe /${{ matrix.sys }}/bin/dlltool.llvm.exe 2>/dev/null || true
-        fi
-        # 从 MSYS 使用 GNU dlltool
-        if [ -f "/usr/bin/dlltool.exe" ]; then
-          ln -sf /usr/bin/dlltool.exe /${{ matrix.sys }}/bin/dlltool.exe
-        fi
-
-    # 创建 Clang 包装脚本
-    - name: 'Setup compiler wrapper for clangarm64'
-      if: ${{ startsWith(matrix.sys, 'clang') }}
-      run: |
-        mkdir -p /${{ matrix.sys }}/bin/wrapper
-        cat > /${{ matrix.sys }}/bin/wrapper/clang << 'EOF'
-        #!/bin/sh
-        exec /${{ matrix.sys }}/bin/clang.exe -target aarch64-w64-windows-gnu "$@"
-        EOF
-        chmod +x /${{ matrix.sys }}/bin/wrapper/clang
-        cat > /${{ matrix.sys }}/bin/wrapper/clang++ << 'EOF'
-        #!/bin/sh
-        exec /${{ matrix.sys }}/bin/clang++.exe -target aarch64-w64-windows-gnu "$@"
-        EOF
-        chmod +x /${{ matrix.sys }}/bin/wrapper/clang++
-        echo "PATH=/${{ matrix.sys }}/bin/wrapper:/${{ matrix.sys }}/bin:\$PATH" >> $GITHUB_ENV
-        echo "CC=clang" >> $GITHUB_ENV
-        echo "CXX=clang++" >> $GITHUB_ENV
-
     - name: 'Modify pkgconfig to avoid linker issues'
       if: ${{ matrix.mode == 'static' }}
       run: |
-        PKGCONFIG_FILE="/${{ matrix.sys }}/lib/pkgconfig/gpg-error.pc"
-        if [ -f "$PKGCONFIG_FILE" ]; then
+          PKGCONFIG_FILE="/${{ matrix.sys }}/lib/pkgconfig/gpg-error.pc"
           sed -i "s#/${{ matrix.sys }}/lib/libintl.dll.a#-llibintl#g" "$PKGCONFIG_FILE"
           sed -i "s#/${{ matrix.sys }}/lib/libiconv.dll.a#-llibiconv#g" "$PKGCONFIG_FILE"
-        fi
 
-    - name: 'Verify environment'
+    - name: ${{ format ('🚧 Build QEMU (arm & aarch64) {0}', matrix.mode) }}
+      env:
+        mode_flags: ${{ matrix.mode == 'dynamic' && env.dynamic_flags || env.static_flags }}
+        extra_cflags: ${{ (matrix.mode == 'static' || startsWith(matrix.sys, 'clang')) && format('--extra-cflags="{0} {1}"', matrix.mode == 'static' && env.static_extra_cflags || '', startsWith(matrix.sys, 'clang') && env.clang_extra_cflags || '') || '' }}
       run: |
-        echo "=========================================="
-        echo "🔍 验证环境"
-        echo "=========================================="
-        echo ""
-        echo "📌 Python 版本:"
-        python3 --version
-        echo ""
-        echo "📌 Meson 版本:"
-        meson --version
-        echo ""
-        echo "📌 Ninja 版本:"
-        ninja --version
-        echo ""
-        echo "📌 编译器信息:"
-        which clang || echo "clang not found"
-        clang --version 2>/dev/null || echo "clang failed"
-        echo ""
-        echo "📌 测试编译:"
-        echo 'int main(){return 0;}' > test.c
-        clang test.c -o test.exe 2>&1 && echo "✅ Compilation works" || echo "❌ Compilation failed"
-        file test.exe 2>/dev/null || echo "file command not available"
-        echo ""
-        echo "📌 环境变量:"
-        echo "CC=$CC"
-        echo "CXX=$CXX"
-        echo "PATH=$PATH"
-        echo ""
-        echo "✅ 环境验证完成"
-
-    - name: 'Configure QEMU (${{ matrix.mode }} build)'
-      run: |
-        # 构建 extra_cflags
-        EXTRA_CFLAGS="${{ matrix.extra_cflags }}"
-        if [[ "${{ matrix.sys }}" == clang* ]]; then
-          EXTRA_CFLAGS="$EXTRA_CFLAGS ${{ env.clang_extra_cflags }}"
-        fi
-        if [[ "${{ matrix.sys }}" == clang* ]]; then
-          EXTRA_CFLAGS="$EXTRA_CFLAGS -target aarch64-w64-windows-gnu"
-        fi
-        
-        # 静态构建时忽略 libslirp 弃用警告
-        if [[ "${{ matrix.mode }}" == "static" ]]; then
-          EXTRA_CFLAGS="$EXTRA_CFLAGS -Wno-deprecated-declarations"
-        fi
-        
-        CONFIGURE_CMD="./configure --enable-sdl \
-                    --enable-fdt=system \
-                    --disable-docs \
-                    --target-list=arm-softmmu,aarch64-softmmu \
-                    --prefix=\"$(cygpath -u '${{ github.workspace }}')/artifacts\" \
-                    ${{ matrix.extra_conf }} \
-                    ${{ matrix.disable_libnfs }}"
-        
-        if [ -n "$EXTRA_CFLAGS" ]; then
-          CONFIGURE_CMD="$CONFIGURE_CMD --extra-cflags=\"$EXTRA_CFLAGS\""
-        fi
-        
-        if [[ "${{ matrix.sys }}" == clang* ]]; then
-          CONFIGURE_CMD="$CONFIGURE_CMD --cc=clang --cxx=clang++"
-        fi
-        
-        echo "Running: $CONFIGURE_CMD"
-        eval $CONFIGURE_CMD
-
-    - name: 'Build QEMU'
-      run: |
-        make -j$(nproc)
-        echo "version=v$(cat VERSION)-$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+          ./configure --enable-sdl --enable-fdt=system --disable-docs --target-list=arm-softmmu,aarch64-softmmu --prefix="$(cygpath -u '${{ github.workspace }}')/artifacts" ${{ format('{0} {1}', env.mode_flags, env.extra_cflags) }}
+          make -j16
+          echo "version=v$(cat VERSION)-$(git rev-parse --short HEAD)" > $GITHUB_ENV
 
     - name: 'Workaround for clangarm64 nsis'
-      if: ${{ startsWith(matrix.sys, 'clang') && matrix.mode == 'dynamic' }}
-      run: |
-        if [ ! -d "/${{ matrix.sys }}/share/nsis" ] && [ -d "/clang64/share/nsis" ]; then
-          ln -s /clang64/share/nsis /${{ matrix.sys }}/share/nsis 2>/dev/null || true
-        fi
-        if [ ! -f "/${{ matrix.sys }}/etc/nsisconf.nsh" ] && [ -f "/clang64/etc/nsisconf.nsh" ]; then
-          ln -s /clang64/etc/nsisconf.nsh /${{ matrix.sys }}/etc/nsisconf.nsh 2>/dev/null || true
-        fi
-        if [ ! -f "/${{ matrix.sys }}/bin/makensis.exe" ] && [ -f "/clang64/bin/makensis.exe" ]; then
-          ln -s /clang64/bin/makensis.exe /${{ matrix.sys }}/bin/makensis.exe 2>/dev/null || true
-        fi
-        chmod +x /${{ matrix.sys }}/bin/makensis.exe 2>/dev/null || true
-
-    - name: 'Prepare artifacts (static)'
-      if: ${{ matrix.mode == 'static' }}
-      run: |
-        make install
-
-    - name: 'Prepare artifacts (dynamic)'
       if: ${{ matrix.mode == 'dynamic' }}
       run: |
-        make installer
-        mv -v build/qemu-setup*.exe qemu-setup-${version}.exe
+          ln -d -s /clang64/share/nsis /clangarm64/share/nsis
+          ln /clang64/etc/nsisconf.nsh /clangarm64/etc/nsisconf.nsh
+          ln /clang64/bin/makensis.exe /clangarm64/bin/makensis.exe
+
+    - name: 'Prepare Artifacts (static)'
+      if: ${{ matrix.mode == 'static' }}
+      run: |
+          make install
+
+    - name: 'Prepare Artifacts (dynamic)'
+      if: ${{ matrix.mode == 'dynamic' }}
+      run: |
+          make installer
+          mv -v build/qemu-setup*.exe qemu-setup-${version}.exe;
 
     - name: 'Upload artifact (dynamic)'
       if: ${{ matrix.mode == 'dynamic' }}
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@main
       with:
-        name: ${{ format('QEMU {0} Windows ARM64 ({1} build)', env.version, matrix.mode) }}
-        path: ${{ github.workspace }}/qemu-setup-${{ env.version }}.exe
+        name: ${{ format('QEMU {0} (Windows ARM64 {1} build)', env.version, matrix.mode) }}
+        path: ${{ github.workspace }}\qemu-setup-${{ env.version }}.exe
         compression-level: 9
 
     - name: 'Upload artifact (static)'
       if: ${{ matrix.mode == 'static' }}
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@main
       with:
-        name: ${{ format('QEMU {0} Windows ARM64 ({1} build)', env.version, matrix.mode) }}
-        path: ${{ github.workspace }}/artifacts
+        name: ${{ format('QEMU {0} (Windows ARM64 {1} build)', env.version, matrix.mode) }}
+        path: ${{ github.workspace }}\artifacts
         compression-level: 9
 
     - name: 'Upload logs'
       if: ${{ failure() }}
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@main
       with:
-        name: ${{ format('QEMU {0} Windows ARM64 ({1} build) logs', env.version, matrix.mode) }}
+        name: ${{ format('QEMU {0} (Windows ARM64 {1} build) logs', env.version, matrix.mode) }}
         path: ${{ github.workspace }}/build
         compression-level: 9
