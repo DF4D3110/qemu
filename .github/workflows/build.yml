@@ -60,9 +60,6 @@ jobs:
           grep
           sed
           base-devel
-          python
-          python-setuptools
-          python-pip
           meson
         pacboy: >-
           toolchain:p
@@ -108,11 +105,22 @@ jobs:
 
     - name: 'Verify environment'
       run: |
+        echo "=========================================="
+        echo "🔍 验证环境"
+        echo "=========================================="
+        echo ""
+        echo "📌 Python 版本:"
         python3 --version
+        echo ""
+        echo "📌 Meson 版本:"
         meson --version
+        echo ""
+        echo "📌 Ninja 版本:"
         ninja --version
+        echo ""
+        echo "✅ 环境验证完成"
 
-    - name: ${{ format('🚧 Build QEMU (arm & aarch64) {0}', matrix.mode) }}
+    - name: 'Configure QEMU (${{ matrix.mode }} build)'
       env:
         mode_flags: ${{ matrix.mode == 'dynamic' && env.dynamic_flags || env.static_flags }}
         extra_cflags: ${{ (matrix.mode == 'static' || startsWith(matrix.sys, 'clang')) && format('--extra-cflags="{0} {1}"', matrix.mode == 'static' && env.static_extra_cflags || '', startsWith(matrix.sys, 'clang') && env.clang_extra_cflags || '') || '' }}
@@ -123,6 +131,9 @@ jobs:
                     --target-list=arm-softmmu,aarch64-softmmu \
                     --prefix="$(cygpath -u '${{ github.workspace }}')/artifacts" \
                     ${{ format('{0} {1}', env.mode_flags, env.extra_cflags) }}
+
+    - name: 'Build QEMU'
+      run: |
         make -j$(nproc)
         echo "version=v$(cat VERSION)-$(git rev-parse --short HEAD)" >> $GITHUB_ENV
 
