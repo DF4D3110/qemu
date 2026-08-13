@@ -1,4 +1,4 @@
-name: Build QEMU (gailium119/qemu)
+name: Build QEMU (DF4D3110/qemu)
 
 on:
   push:
@@ -7,8 +7,6 @@ on:
 
 jobs:
   build-windows:
-    name: 🚧 Windows ${{ matrix.sys }} (${{ matrix.mode }} build)
-    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
@@ -29,23 +27,26 @@ jobs:
           - os: windows-11-arm
             sys: clangarm64
             mode: static
+    runs-on: ${{ matrix.os }}
     env:
-      # 动态构建标志
       dynamic_flags: '--enable-gtk'
-      # 静态构建标志
       static_flags: '--disable-gtk --disable-spice --disable-usb-redir --disable-smartcard --disable-gnutls --disable-libssh --disable-vnc-sasl --static'
       static_extra_cflags: '-DCURL_STATICLIB -DLIBSSH_STATIC -DLIBSLIRP_STATIC -DCAIRO_WIN32_STATIC_BUILD'
-      # clang 额外 CFLAGS
       clang_extra_cflags: '-Wno-missing-prototypes -Wno-sometimes-uninitialized -Wno-pragma-pack'
+
+    name: ${{ format('🚧 Windows {0} {1} build', matrix.sys, matrix.mode) }}
     defaults:
       run:
         shell: msys2 {0}
 
     steps:
     - name: '🧰 Checkout'
-      uses: actions/checkout@main
+      uses: actions/checkout@v4
+      with:
+        repository: DF4D3110/qemu
+        ref: master
 
-    - name: 'Setup MSYS2 (${{ matrix.sys }})'
+    - name: 'Setup MSYS2'
       uses: msys2/setup-msys2@v2
       with:
         msystem: ${{ matrix.sys }}
@@ -62,6 +63,7 @@ jobs:
           python
           python-setuptools
           python-pip
+          meson
         pacboy: >-
           toolchain:p
           binutils:p
@@ -86,6 +88,7 @@ jobs:
           ninja:p
           pixman:p
           pkgconf:p
+          python:p
           SDL2:p
           SDL2_image:p
           snappy:p
@@ -96,20 +99,20 @@ jobs:
           python-distlib:p
           nsis:${{ endsWith(matrix.os, 'arm') && 'c' || 'p' }}
 
-    - name: '修改 pkgconfig 避免静态链接问题'
+    - name: 'Modify pkgconfig to avoid linker issues'
       if: ${{ matrix.mode == 'static' }}
       run: |
         PKGCONFIG_FILE="/${{ matrix.sys }}/lib/pkgconfig/gpg-error.pc"
         sed -i "s#/${{ matrix.sys }}/lib/libintl.dll.a#-llibintl#g" "$PKGCONFIG_FILE"
         sed -i "s#/${{ matrix.sys }}/lib/libiconv.dll.a#-llibiconv#g" "$PKGCONFIG_FILE"
 
-    - name: '验证 Python 环境'
+    - name: 'Verify environment'
       run: |
         python3 --version
-        python3 -c "import sys; print('Python executable:', sys.executable)"
-        python3 -c "import sys; print('Python version:', sys.version)"
+        meson --version
+        ninja --version
 
-    - name: '配置 QEMU (${{ matrix.mode }} 构建)'
+    - name: ${{ format('🚧 Build QEMU (arm & aarch64) {0}', matrix.mode) }}
       env:
         mode_flags: ${{ matrix.mode == 'dynamic' && env.dynamic_flags || env.static_flags }}
         extra_cflags: ${{ (matrix.mode == 'static' || startsWith(matrix.sys, 'clang')) && format('--extra-cflags="{0} {1}"', matrix.mode == 'static' && env.static_extra_cflags || '', startsWith(matrix.sys, 'clang') && env.clang_extra_cflags || '') || '' }}
@@ -120,9 +123,6 @@ jobs:
                     --target-list=arm-softmmu,aarch64-softmmu \
                     --prefix="$(cygpath -u '${{ github.workspace }}')/artifacts" \
                     ${{ format('{0} {1}', env.mode_flags, env.extra_cflags) }}
-
-    - name: '编译 QEMU'
-      run: |
         make -j$(nproc)
         echo "version=v$(cat VERSION)-$(git rev-parse --short HEAD)" >> $GITHUB_ENV
 
@@ -133,37 +133,37 @@ jobs:
         ln -s /clang64/etc/nsisconf.nsh /clangarm64/etc/nsisconf.nsh 2>/dev/null || true
         ln -s /clang64/bin/makensis.exe /clangarm64/bin/makensis.exe 2>/dev/null || true
 
-    - name: '准备产物 (静态构建)'
+    - name: 'Prepare artifacts (static)'
       if: ${{ matrix.mode == 'static' }}
       run: |
         make install
 
-    - name: '准备产物 (动态构建)'
+    - name: 'Prepare artifacts (dynamic)'
       if: ${{ matrix.mode == 'dynamic' }}
       run: |
         make installer
         mv -v build/qemu-setup*.exe qemu-setup-${version}.exe
 
-    - name: '上传产物 (动态构建)'
+    - name: 'Upload artifact (dynamic)'
       if: ${{ matrix.mode == 'dynamic' }}
-      uses: actions/upload-artifact@main
+      uses: actions/upload-artifact@v4
       with:
         name: ${{ format('QEMU {0} Windows ({1} {2} build)', env.version, matrix.sys, matrix.mode) }}
         path: ${{ github.workspace }}/qemu-setup-${{ env.version }}.exe
         compression-level: 9
 
-    - name: '上传产物 (静态构建)'
+    - name: 'Upload artifact (static)'
       if: ${{ matrix.mode == 'static' }}
-      uses: actions/upload-artifact@main
+      uses: actions/upload-artifact@v4
       with:
         name: ${{ format('QEMU {0} Windows ({1} {2} build)', env.version, matrix.sys, matrix.mode) }}
         path: ${{ github.workspace }}/artifacts
         compression-level: 9
 
-    - name: '上传日志 (如果失败)'
+    - name: 'Upload logs'
       if: ${{ failure() }}
-      uses: actions/upload-artifact@main
+      uses: actions/upload-artifact@v4
       with:
         name: ${{ format('QEMU {0} Windows ({1} {2} build) logs', env.version, matrix.sys, matrix.mode) }}
         path: ${{ github.workspace }}/build
-        compression-level: 9 
+        compression-level: 9
