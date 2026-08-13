@@ -87,7 +87,7 @@ jobs:
           python-distlib:p
           nsis:c
 
-    # 关键修复：安装正确的 MinGW Python 和 Meson
+    # 安装正确的 MinGW Python 和 Meson
     - name: 'Install MinGW Python and Meson'
       run: |
         pacman --noconfirm -S \
@@ -95,17 +95,24 @@ jobs:
           mingw-w64-${{ matrix.arch }}-meson \
           mingw-w64-${{ matrix.arch }}-python-packaging
 
-    # 修复 clangarm64 的编译器问题
+    # 关键修复：为 clangarm64 设置正确的 target 参数
     - name: 'Setup compiler for clangarm64'
       if: ${{ startsWith(matrix.sys, 'clang') }}
       run: |
-        # 确保 clang 可用，并创建 cc 符号链接
+        # 创建 cc 符号链接指向 clang
         if [ -f "/${{ matrix.sys }}/bin/clang.exe" ]; then
           ln -sf clang.exe /${{ matrix.sys }}/bin/cc.exe
         fi
-        # 设置环境变量让 configure 使用正确的编译器
+        
+        # 设置编译器和目标架构参数
         echo "CC=clang" >> $GITHUB_ENV
         echo "CXX=clang++" >> $GITHUB_ENV
+        
+        # 关键：设置 CFLAGS 让 clang 知道目标是 ARM64
+        # QEMU 的 configure 会检查编译器是否能工作，需要正确的 target
+        echo "CFLAGS=-target aarch64-w64-windows-gnu" >> $GITHUB_ENV
+        echo "CXXFLAGS=-target aarch64-w64-windows-gnu" >> $GITHUB_ENV
+        echo "LDFLAGS=-target aarch64-w64-windows-gnu" >> $GITHUB_ENV
 
     - name: 'Modify pkgconfig to avoid linker issues'
       if: ${{ matrix.mode == 'static' }}
@@ -135,14 +142,17 @@ jobs:
         if command -v clang &>/dev/null; then
           echo "Clang 版本:"
           clang --version
-        fi
-        if command -v gcc &>/dev/null; then
-          echo "GCC 版本:"
-          gcc -dumpmachine
+          echo ""
+          echo "测试 Clang 目标:"
+          clang -target aarch64-w64-windows-gnu -E - < /dev/null 2>&1 && echo "✅ ARM64 target works" || echo "❌ ARM64 target failed"
         fi
         echo ""
-        echo "📌 PATH:"
-        echo $PATH | tr ':' '\n'
+        echo "📌 环境变量:"
+        echo "CC=$CC"
+        echo "CXX=$CXX"
+        echo "CFLAGS=$CFLAGS"
+        echo "CXXFLAGS=$CXXFLAGS"
+        echo "LDFLAGS=$LDFLAGS"
         echo ""
         echo "✅ 环境验证完成"
 
@@ -163,10 +173,10 @@ jobs:
           EXTRA_CFLAGS="--extra-cflags=\"$EXTRA_CFLAGS\""
         fi
         
-        # 对于 clangarm64，显式指定 CC 和 CXX
+        # 对于 clangarm64，显式指定 CC、CXX 和 CFLAGS
         CC_OPTS=""
         if [[ "${{ matrix.sys }}" == clang* ]]; then
-          CC_OPTS="--cc=clang --cxx=clang++"
+          CC_OPTS="--cc=clang --cxx=clang++ --extra-cflags=\"-target aarch64-w64-windows-gnu\""
         fi
         
         ./configure --enable-sdl \
