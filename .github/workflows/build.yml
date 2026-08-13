@@ -98,6 +98,19 @@ jobs:
           mingw-w64-${{ matrix.arch }}-meson \
           mingw-w64-${{ matrix.arch }}-python-packaging
 
+    # 修复 dlltool 用于动态构建
+    - name: 'Fix dlltool for dynamic build'
+      if: ${{ matrix.mode == 'dynamic' && startsWith(matrix.sys, 'clang') }}
+      run: |
+        # 备份 LLVM dlltool
+        if [ -f "/${{ matrix.sys }}/bin/dlltool.exe" ]; then
+          mv /${{ matrix.sys }}/bin/dlltool.exe /${{ matrix.sys }}/bin/dlltool.llvm.exe 2>/dev/null || true
+        fi
+        # 从 MSYS 使用 GNU dlltool
+        if [ -f "/usr/bin/dlltool.exe" ]; then
+          ln -sf /usr/bin/dlltool.exe /${{ matrix.sys }}/bin/dlltool.exe
+        fi
+
     # 创建 Clang 包装脚本
     - name: 'Setup compiler wrapper for clangarm64'
       if: ${{ startsWith(matrix.sys, 'clang') }}
@@ -166,6 +179,11 @@ jobs:
         fi
         if [[ "${{ matrix.sys }}" == clang* ]]; then
           EXTRA_CFLAGS="$EXTRA_CFLAGS -target aarch64-w64-windows-gnu"
+        fi
+        
+        # 静态构建时忽略 libslirp 弃用警告
+        if [[ "${{ matrix.mode }}" == "static" ]]; then
+          EXTRA_CFLAGS="$EXTRA_CFLAGS -Wno-deprecated-declarations"
         fi
         
         CONFIGURE_CMD="./configure --enable-sdl \
