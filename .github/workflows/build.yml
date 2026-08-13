@@ -16,16 +16,19 @@ jobs:
             sys: clangarm64
             arch: clang-aarch64
             mode: dynamic
+            extra_conf: '--enable-gtk'
+            extra_cflags: ''
+            disable_libnfs: ''
           # ARM64 原生静态构建
           - os: windows-11-arm
             sys: clangarm64
             arch: clang-aarch64
             mode: static
+            extra_conf: '--disable-gtk --disable-spice --disable-usb-redir --disable-smartcard --disable-gnutls --disable-libssh --disable-vnc-sasl --static'
+            extra_cflags: '-DCURL_STATICLIB -DLIBSSH_STATIC -DLIBSLIRP_STATIC -DCAIRO_WIN32_STATIC_BUILD'
+            disable_libnfs: '--disable-libnfs'
     runs-on: ${{ matrix.os }}
     env:
-      dynamic_flags: '--enable-gtk'
-      static_flags: '--disable-gtk --disable-spice --disable-usb-redir --disable-smartcard --disable-gnutls --disable-libssh --disable-vnc-sasl --static'
-      static_extra_cflags: '-DCURL_STATICLIB -DLIBSSH_STATIC -DLIBSLIRP_STATIC -DCAIRO_WIN32_STATIC_BUILD'
       clang_extra_cflags: '-Wno-missing-prototypes -Wno-sometimes-uninitialized -Wno-pragma-pack'
 
     name: ${{ format('🚧 Windows {0} {1} build (ARM64)', matrix.sys, matrix.mode) }}
@@ -95,30 +98,22 @@ jobs:
           mingw-w64-${{ matrix.arch }}-meson \
           mingw-w64-${{ matrix.arch }}-python-packaging
 
-    # 关键修复：创建一个包装脚本，让 clang 默认使用 ARM64 target
+    # 创建 Clang 包装脚本
     - name: 'Setup compiler wrapper for clangarm64'
       if: ${{ startsWith(matrix.sys, 'clang') }}
       run: |
-        # 创建包装脚本目录
-        mkdir -p /clangarm64/bin/wrapper
-        
-        # 创建 clang 包装脚本，默认添加 -target 参数
-        cat > /clangarm64/bin/wrapper/clang << 'EOF'
+        mkdir -p /${{ matrix.sys }}/bin/wrapper
+        cat > /${{ matrix.sys }}/bin/wrapper/clang << 'EOF'
         #!/bin/sh
-        exec /clangarm64/bin/clang.exe -target aarch64-w64-windows-gnu "$@"
+        exec /${{ matrix.sys }}/bin/clang.exe -target aarch64-w64-windows-gnu "$@"
         EOF
-        chmod +x /clangarm64/bin/wrapper/clang
-        
-        cat > /clangarm64/bin/wrapper/clang++ << 'EOF'
+        chmod +x /${{ matrix.sys }}/bin/wrapper/clang
+        cat > /${{ matrix.sys }}/bin/wrapper/clang++ << 'EOF'
         #!/bin/sh
-        exec /clangarm64/bin/clang++.exe -target aarch64-w64-windows-gnu "$@"
+        exec /${{ matrix.sys }}/bin/clang++.exe -target aarch64-w64-windows-gnu "$@"
         EOF
-        chmod +x /clangarm64/bin/wrapper/clang++
-        
-        # 设置 PATH 优先使用包装脚本
-        echo "PATH=/clangarm64/bin/wrapper:/clangarm64/bin:\$PATH" >> $GITHUB_ENV
-        
-        # 设置编译器环境变量
+        chmod +x /${{ matrix.sys }}/bin/wrapper/clang++
+        echo "PATH=/${{ matrix.sys }}/bin/wrapper:/${{ matrix.sys }}/bin:\$PATH" >> $GITHUB_ENV
         echo "CC=clang" >> $GITHUB_ENV
         echo "CXX=clang++" >> $GITHUB_ENV
 
@@ -152,7 +147,7 @@ jobs:
         echo ""
         echo "📌 测试编译:"
         echo 'int main(){return 0;}' > test.c
-        clang -target aarch64-w64-windows-gnu test.c -o test.exe 2>&1 && echo "✅ Compilation works" || echo "❌ Compilation failed"
+        clang test.c -o test.exe 2>&1 && echo "✅ Compilation works" || echo "❌ Compilation failed"
         file test.exe 2>/dev/null || echo "file command not available"
         echo ""
         echo "📌 环境变量:"
@@ -163,30 +158,23 @@ jobs:
         echo "✅ 环境验证完成"
 
     - name: 'Configure QEMU (${{ matrix.mode }} build)'
-      env:
-        mode_flags: ${{ matrix.mode == 'dynamic' && env.dynamic_flags || env.static_flags }}
       run: |
         # 构建 extra_cflags
-        EXTRA_CFLAGS=""
-        if [ "${{ matrix.mode }}" == "static" ]; then
-          EXTRA_CFLAGS="$EXTRA_CFLAGS ${{ env.static_extra_cflags }}"
-        fi
+        EXTRA_CFLAGS="${{ matrix.extra_cflags }}"
         if [[ "${{ matrix.sys }}" == clang* ]]; then
           EXTRA_CFLAGS="$EXTRA_CFLAGS ${{ env.clang_extra_cflags }}"
         fi
-        
-        # 对于 clangarm64，通过 --extra-cflags 传递 target
         if [[ "${{ matrix.sys }}" == clang* ]]; then
           EXTRA_CFLAGS="$EXTRA_CFLAGS -target aarch64-w64-windows-gnu"
         fi
         
-        # 构建 configure 命令
         CONFIGURE_CMD="./configure --enable-sdl \
                     --enable-fdt=system \
                     --disable-docs \
                     --target-list=arm-softmmu,aarch64-softmmu \
                     --prefix=\"$(cygpath -u '${{ github.workspace }}')/artifacts\" \
-                    ${{ env.mode_flags }}"
+                    ${{ matrix.extra_conf }} \
+                    ${{ matrix.disable_libnfs }}"
         
         if [ -n "$EXTRA_CFLAGS" ]; then
           CONFIGURE_CMD="$CONFIGURE_CMD --extra-cflags=\"$EXTRA_CFLAGS\""
@@ -204,7 +192,6 @@ jobs:
         make -j$(nproc)
         echo "version=v$(cat VERSION)-$(git rev-parse --short HEAD)" >> $GITHUB_ENV
 
-    # 对于 clangarm64，需要正确的 NSIS 路径
     - name: 'Workaround for clangarm64 nsis'
       if: ${{ startsWith(matrix.sys, 'clang') && matrix.mode == 'dynamic' }}
       run: |
