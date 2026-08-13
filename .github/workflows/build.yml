@@ -6,35 +6,21 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-windows:
+  build-windows-arm64:
     strategy:
       fail-fast: false
       matrix:
         include:
-          # AMD64 动态构建
-          - os: windows-latest
-            sys: mingw64
-            arch: x86_64
-            mode: dynamic
-            nsis_suffix: p
-          # AMD64 静态构建
-          - os: windows-latest
-            sys: mingw64
-            arch: x86_64
-            mode: static
-            nsis_suffix: p
           # ARM64 原生动态构建
           - os: windows-11-arm
             sys: clangarm64
             arch: clang-aarch64
             mode: dynamic
-            nsis_suffix: c
           # ARM64 原生静态构建
           - os: windows-11-arm
             sys: clangarm64
             arch: clang-aarch64
             mode: static
-            nsis_suffix: c
     runs-on: ${{ matrix.os }}
     env:
       dynamic_flags: '--enable-gtk'
@@ -42,7 +28,7 @@ jobs:
       static_extra_cflags: '-DCURL_STATICLIB -DLIBSSH_STATIC -DLIBSLIRP_STATIC -DCAIRO_WIN32_STATIC_BUILD'
       clang_extra_cflags: '-Wno-missing-prototypes -Wno-sometimes-uninitialized -Wno-pragma-pack'
 
-    name: ${{ format('🚧 Windows {0} {1} build', matrix.sys, matrix.mode) }}
+    name: ${{ format('🚧 Windows {0} {1} build (ARM64)', matrix.sys, matrix.mode) }}
     defaults:
       run:
         shell: msys2 {0}
@@ -76,7 +62,6 @@ jobs:
           curl:p
           cyrus-sasl:p
           dtc:p
-          gcc:p
           glib2:p
           gnutls:p
           gtk3:p
@@ -100,28 +85,36 @@ jobs:
           zstd:p
           libslirp:p
           python-distlib:p
-          nsis:${{ matrix.nsis_suffix }}
+          nsis:c
 
-    # 关键修复：显式安装正确的 Python 和 Meson（MinGW 版本）
+    # 关键修复：安装正确的 MinGW Python 和 Meson
     - name: 'Install MinGW Python and Meson'
       run: |
         pacman --noconfirm -S \
           mingw-w64-${{ matrix.arch }}-python \
-          mingw-w64-${{ matrix.arch }}-meson
+          mingw-w64-${{ matrix.arch }}-meson \
+          mingw-w64-${{ matrix.arch }}-python-packaging
 
-    # 对于 clangarm64，需要额外安装 python-packaging
-    - name: 'Install additional Python packages for clangarm64'
+    # 修复 clangarm64 的编译器问题
+    - name: 'Setup compiler for clangarm64'
       if: ${{ startsWith(matrix.sys, 'clang') }}
       run: |
-        pacman --noconfirm -S \
-          mingw-w64-${{ matrix.arch }}-python-packaging
+        # 确保 clang 可用，并创建 cc 符号链接
+        if [ -f "/${{ matrix.sys }}/bin/clang.exe" ]; then
+          ln -sf clang.exe /${{ matrix.sys }}/bin/cc.exe
+        fi
+        # 设置环境变量让 configure 使用正确的编译器
+        echo "CC=clang" >> $GITHUB_ENV
+        echo "CXX=clang++" >> $GITHUB_ENV
 
     - name: 'Modify pkgconfig to avoid linker issues'
       if: ${{ matrix.mode == 'static' }}
       run: |
         PKGCONFIG_FILE="/${{ matrix.sys }}/lib/pkgconfig/gpg-error.pc"
-        sed -i "s#/${{ matrix.sys }}/lib/libintl.dll.a#-llibintl#g" "$PKGCONFIG_FILE"
-        sed -i "s#/${{ matrix.sys }}/lib/libiconv.dll.a#-llibiconv#g" "$PKGCONFIG_FILE"
+        if [ -f "$PKGCONFIG_FILE" ]; then
+          sed -i "s#/${{ matrix.sys }}/lib/libintl.dll.a#-llibintl#g" "$PKGCONFIG_FILE"
+          sed -i "s#/${{ matrix.sys }}/lib/libiconv.dll.a#-llibiconv#g" "$PKGCONFIG_FILE"
+        fi
 
     - name: 'Verify environment'
       run: |
@@ -138,8 +131,18 @@ jobs:
         echo "📌 Ninja 版本:"
         ninja --version
         echo ""
-        echo "📌 架构信息:"
-        gcc -dumpmachine
+        echo "📌 编译器信息:"
+        if command -v clang &>/dev/null; then
+          echo "Clang 版本:"
+          clang --version
+        fi
+        if command -v gcc &>/dev/null; then
+          echo "GCC 版本:"
+          gcc -dumpmachine
+        fi
+        echo ""
+        echo "📌 PATH:"
+        echo $PATH | tr ':' '\n'
         echo ""
         echo "✅ 环境验证完成"
 
@@ -160,13 +163,20 @@ jobs:
           EXTRA_CFLAGS="--extra-cflags=\"$EXTRA_CFLAGS\""
         fi
         
+        # 对于 clangarm64，显式指定 CC 和 CXX
+        CC_OPTS=""
+        if [[ "${{ matrix.sys }}" == clang* ]]; then
+          CC_OPTS="--cc=clang --cxx=clang++"
+        fi
+        
         ./configure --enable-sdl \
                     --enable-fdt=system \
                     --disable-docs \
                     --target-list=arm-softmmu,aarch64-softmmu \
                     --prefix="$(cygpath -u '${{ github.workspace }}')/artifacts" \
                     ${{ env.mode_flags }} \
-                    $EXTRA_CFLAGS
+                    $EXTRA_CFLAGS \
+                    $CC_OPTS
 
     - name: 'Build QEMU'
       run: |
@@ -177,7 +187,6 @@ jobs:
     - name: 'Workaround for clangarm64 nsis'
       if: ${{ startsWith(matrix.sys, 'clang') && matrix.mode == 'dynamic' }}
       run: |
-        # 创建符号链接让 NSIS 在 clangarm64 环境中工作
         if [ ! -d "/${{ matrix.sys }}/share/nsis" ] && [ -d "/clang64/share/nsis" ]; then
           ln -s /clang64/share/nsis /${{ matrix.sys }}/share/nsis 2>/dev/null || true
         fi
@@ -187,7 +196,6 @@ jobs:
         if [ ! -f "/${{ matrix.sys }}/bin/makensis.exe" ] && [ -f "/clang64/bin/makensis.exe" ]; then
           ln -s /clang64/bin/makensis.exe /${{ matrix.sys }}/bin/makensis.exe 2>/dev/null || true
         fi
-        # 确保可执行权限
         chmod +x /${{ matrix.sys }}/bin/makensis.exe 2>/dev/null || true
 
     - name: 'Prepare artifacts (static)'
@@ -205,7 +213,7 @@ jobs:
       if: ${{ matrix.mode == 'dynamic' }}
       uses: actions/upload-artifact@v4
       with:
-        name: ${{ format('QEMU {0} Windows ({1} {2} build)', env.version, matrix.sys, matrix.mode) }}
+        name: ${{ format('QEMU {0} Windows ARM64 ({1} build)', env.version, matrix.mode) }}
         path: ${{ github.workspace }}/qemu-setup-${{ env.version }}.exe
         compression-level: 9
 
@@ -213,7 +221,7 @@ jobs:
       if: ${{ matrix.mode == 'static' }}
       uses: actions/upload-artifact@v4
       with:
-        name: ${{ format('QEMU {0} Windows ({1} {2} build)', env.version, matrix.sys, matrix.mode) }}
+        name: ${{ format('QEMU {0} Windows ARM64 ({1} build)', env.version, matrix.mode) }}
         path: ${{ github.workspace }}/artifacts
         compression-level: 9
 
@@ -221,6 +229,6 @@ jobs:
       if: ${{ failure() }}
       uses: actions/upload-artifact@v4
       with:
-        name: ${{ format('QEMU {0} Windows ({1} {2} build) logs', env.version, matrix.sys, matrix.mode) }}
+        name: ${{ format('QEMU {0} Windows ARM64 ({1} build) logs', env.version, matrix.mode) }}
         path: ${{ github.workspace }}/build
         compression-level: 9
